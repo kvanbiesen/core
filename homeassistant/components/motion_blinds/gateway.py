@@ -92,6 +92,9 @@ class ConnectMotionGateway:
 
         if len(enabled_interfaces) == 1:
             default_interface = enabled_interfaces[0]
+
+        # Prioritize default interface regardless of how many NICs are present
+        if default_interface != DEFAULT_INTERFACE:
             interfaces.remove(default_interface)
             interfaces.insert(0, default_interface)
 
@@ -102,48 +105,50 @@ class ConnectMotionGateway:
         return interfaces
 
     async def async_check_interface(self, host, key):
-        """Connect to the Motion Gateway."""
-        interfaces = await self.async_get_interfaces()
-        for interface in interfaces:
-            _LOGGER.debug(
-                "Checking Motionblinds interface '%s' with host %s", interface, host
-            )
-            # initialize multicast listener
-            check_multicast = AsyncMotionMulticast(interface=interface)
-            try:
-                await check_multicast.Start_listen()
-            except socket.gaierror:
-                continue
-            except OSError:
-                continue
-
-            # trigger test multicast
-            self._gateway_device = MotionGateway(
-                ip=host, key=key, multicast=check_multicast
-            )
-            result = await self._hass.async_add_executor_job(self.check_interface)
-
-            # close multicast listener again
-            try:
-                check_multicast.Stop_listen()
-            except socket.gaierror:
-                continue
-
-            if result:
-                # successfully received multicast
-                _LOGGER.debug(
-                    "Success using Motionblinds interface '%s' with host %s",
-                    interface,
-                    host,
-                )
-                return interface
-
-        _LOGGER.error(
-            (
-                "Could not find working interface for Motionblinds host %s, using"
-                " interface '%s'"
-            ),
-            host,
-            self._interface,
+    """Connect to the Motion Gateway."""
+    interfaces = await self.async_get_interfaces()
+    for interface in interfaces:
+        _LOGGER.debug(
+            "Checking Motionblinds interface '%s' with host %s", interface, host
         )
-        return self._interface
+        check_multicast = AsyncMotionMulticast(interface=interface)
+        try:
+            await check_multicast.Start_listen()
+        except socket.gaierror:
+            continue
+        except OSError:
+            continue
+
+        self._gateway_device = MotionGateway(
+            ip=host, key=key, multicast=check_multicast
+        )
+
+        # Fail fast per interface instead of waiting for full socket timeout
+        try:
+            async with asyncio.timeout(5):
+                result = await self._hass.async_add_executor_job(self.check_interface)
+        except TimeoutError:
+            result = False
+
+        try:
+            check_multicast.Stop_listen()
+        except socket.gaierror:
+            continue
+
+        if result:
+            _LOGGER.debug(
+                "Success using Motionblinds interface '%s' with host %s",
+                interface,
+                host,
+            )
+            return interface
+
+    _LOGGER.error(
+        (
+            "Could not find working interface for Motionblinds host %s, using"
+            " interface '%s'"
+        ),
+        host,
+        self._interface,
+    )
+    return self._interface
